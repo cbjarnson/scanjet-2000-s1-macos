@@ -14,18 +14,28 @@ The **ScanJet** menu in the menu bar offers:
 - **Use front Scan button**: enables or pauses the hardware trigger.
 - **Scan both sides**: duplex on by default; turn it off for simplex.
 - **Choose save folder…**: defaults to `~/Documents/Scans` and remembers changes.
-- **Open save folder** and **Show latest PDF**.
+- **Save as**: PDF by default, or JPEG when you explicitly choose it. The choice
+  stays selected for future scans and after restarting until you change it.
+- **File size**: Smallest, Balanced (default), or Higher quality. This choice is
+  also remembered. All three retain 300 dpi; they vary JPEG compression.
+- **Open save folder** and **Show latest scan**.
 
-Every batch gets a separate, uniquely named PDF. Pages within that batch are
-combined, and the next press creates a new document. Color, 300 dpi, US Letter.
+Each PDF batch becomes one uniquely named document. JPEG mode creates a new
+folder per batch with `Page 0001.jpg`, `Page 0002.jpg`, and so on, in scanner order
+(one image per scanned side). The next press starts a new batch. Color, 300 dpi,
+US Letter. Settings affect future scans only; existing files stay untouched.
+
+PDFs embed the compressed JPEG images, so they are substantially smaller than
+the lossless PDFs from v0.2.0. Actual size varies with the paper. Choose Higher
+quality when small details matter more than file size.
 No OCR, cleanup, blank-page deletion, or automatic opening of another app.
 Close Image Capture or other scanner apps before using this helper.
 
 On a failed or cancelled scan, received pages are saved with `INCOMPLETE` in
-the filename. Original page files remain in `.scanjet-work` under the save
-folder if a scan or PDF conversion fails. That folder is hidden in Finder;
+the PDF filename or JPEG folder name. Original page files remain in `.scanjet-work`
+under the save folder if a scan or output conversion fails. That folder is hidden in Finder;
 Command-Shift-period shows hidden files. Successful batches remove only their
-own temporary page files after validating the PDF data and saving the PDF.
+own temporary page files after validating and saving the output.
 
 ## Implementation evidence
 
@@ -54,8 +64,11 @@ The prior PDFs remained byte-for-byte unchanged. The folder chooser was used
 to change the destination, and that choice survived restarting the helper.
 Page order and orientation follow the loaded paper. The final front-button
 test was upside down on both sides; no automatic rotation was applied.
-Scans retain lossless image data; files can be large (about 23 MB for the
-tested two-page document). Apply compression in later processing if needed. The build's
-offline test checks that two batches stay separate, a partial output is
-marked, and an empty batch creates no PDF. Those checks do not prove hardware
+Those v0.2.0 scans retained lossless images. Starting with v0.3.0, both formats
+use adjustable JPEG compression, with Balanced as the default. The build's
+offline tests check compression levels, JPEG dimensions and numbered output,
+PDF page count and compressed JPEG embedding, separate batches, partial-output
+names, rejecting duplicate publication, and empty or unreadable input. Those checks do not prove hardware
 scanning, restart behavior, reconnection, or paper-jam recovery.
+The separate physical and preference-persistence checks for v0.3.0 are recorded
+in [release validation](../docs/TESTING.md).

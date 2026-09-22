@@ -15,7 +15,14 @@ Apple's general guide: [Scan images or documents](https://support.apple.com/guid
 ## Front-panel scan button
 
 Use the optional [ScanJet Button helper](../button-helper/README.md) for one
-fresh PDF per press. Its **Choose save folder…** control remembers the destination;
+fresh batch per press. **Save as** defaults to PDF (all pages combined); choose
+JPEG explicitly for a numbered image per side in a new batch folder. This format
+stays selected until you change it. **File size** offers Smallest, Balanced
+(default), and Higher quality, all at 300 dpi. Format and size choices survive
+restarting the helper and affect both the front button and the on-screen scan
+button. Existing files are left untouched.
+
+Its **Choose save folder…** control remembers the destination;
 **Scan both sides** controls duplex. The default save folder is Documents/Scans.
 The helper can stay in the menu bar with its window closed. It must remain running,
 and Image Capture or other scanner apps must release the scanner first.

@@ -1,6 +1,6 @@
 # Release validation
 
-Version 0.2.0, 2026-09-21. Experimental source-only release.
+Version 0.3.0, 2026-09-22. Experimental source-only release.
 
 ## Helper checks performed
 
@@ -41,6 +41,28 @@ the driver or move paper. It is not a second independent hardware test.
   correction is not implemented, and the output was left unchanged.
 - Changing the destination through the folder chooser persisted across app
   restarts. Original HP components were not changed for button support.
+
+## Smaller files and format selection in v0.3.0
+
+- Native arm64 compilation, local ad-hoc signature verification, and the build's
+  offline output checks passed. These cover all three compression levels, JPEG
+  dimensions and numbered files, PDF page counts and embedded compressed JPEG
+  streams, separate batches, INCOMPLETE naming, duplicate-save refusal, and empty
+  or unreadable input.
+- JPEG and Smallest were selected in the controls, then the helper was restarted.
+  Both selections and the chosen destination persisted. PDF and Balanced were
+  restored and verified after another restart, then front-button listening resumed.
+- Two new physical duplex acquisitions using PDF and Balanced produced a two-page
+  PDF (8,146,206 bytes) and a separate 30-page PDF (48,347,039 bytes). Every page
+  contained a compressed JPEG stream. The two-page document retained 300-dpi
+  image dimensions, and its first page was rendered and visually checked for
+  readable text. These are different documents from the earlier lossless tests;
+  their sizes are not a controlled compression-ratio comparison.
+- SHA-256 checks confirmed all six pre-existing scan PDFs remained unchanged.
+  No existing scans were recompressed. No HP components were changed.
+- JPEG file generation was tested offline; a physical acquisition with JPEG
+  selected has not yet been tested. The confirmed physical front-button sequence
+  above was tested in v0.2.0; the USB query and acquisition lifecycle are unchanged.
 
 ## Still unverified
 

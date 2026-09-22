@@ -42,8 +42,11 @@ Alternatively, use the exact original package you already downloaded from HP:
 ## Optional front-button scanning
 
 The [ScanJet Button helper](button-helper/README.md) adds a native Apple Silicon
-menu-bar app. Each front-button press creates a fresh PDF, with duplex on by
-default and a remembered save folder. Close Image Capture and other scanner apps
+menu-bar app. Each front-button press creates a fresh PDF by default, with duplex
+on and a remembered save folder. You can explicitly select JPEG images instead;
+the format stays selected until you change it, including across app restarts.
+Smallest, Balanced (default), and Higher quality file-size settings retain 300 dpi.
+PDFs now embed compressed images. Existing scans are never recompressed. Close Image Capture and other scanner apps
 when using it. No OCR or cleanup is applied.
 
 Build from source with Apple's Command Line Tools or Xcode installed:

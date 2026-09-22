@@ -3,6 +3,7 @@
 #import <ImageCaptureCore/ImageCaptureCore.h>
 #import <PDFKit/PDFKit.h>
 #import <ImageIO/ImageIO.h>
+#import "ScanOutput.h"
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -17,43 +18,6 @@ static void Emit(NSDictionary *event){
 static NSError *Failure(NSString *text) {
     return [NSError errorWithDomain:@"ScanJetButton" code:1 userInfo:@{NSLocalizedDescriptionKey:text}];
 }
-static PDFPage *PageFromImage(NSURL *url) {
-    CGImageSourceRef source=CGImageSourceCreateWithURL((__bridge CFURLRef)url,NULL);
-    if(!source)return nil;
-    CGImageRef image=CGImageSourceCreateImageAtIndex(source,0,NULL);CFRelease(source);
-    if(!image)return nil;
-    NSMutableData *data=[NSMutableData data];
-    CGDataConsumerRef sink=CGDataConsumerCreateWithCFData((__bridge CFMutableDataRef)data);
-    CGRect paper=CGRectMake(0,0,612,792);
-    CGContextRef context=CGPDFContextCreate(sink,&paper,NULL);CGDataConsumerRelease(sink);
-    if(!context){CGImageRelease(image);return nil;}
-    CGPDFContextBeginPage(context,NULL);
-    CGFloat width=CGImageGetWidth(image)*72.0/300.0,height=CGImageGetHeight(image)*72.0/300.0;
-    CGContextDrawImage(context,CGRectMake(0,792-height,width,height),image);
-    CGPDFContextEndPage(context);CGPDFContextClose(context);CGContextRelease(context);CGImageRelease(image);
-    PDFDocument *pdf=[[PDFDocument alloc] initWithData:data];
-    return [[pdf pageAtIndex:0] copy];
-}
-// A fresh job gets its own directory and document. Never append to a previous PDF.
-static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSError **error) {
-    if(pdf.pageCount==0){if(error)*error=Failure(@"No pages were received.");return nil;}
-    NSData *data=pdf.dataRepresentation;
-    PDFDocument *check=data?[[PDFDocument alloc] initWithData:data]:nil;
-    if(check.pageCount!=pdf.pageCount){if(error)*error=Failure(@"The PDF could not be verified. Original pages are retained.");return nil;}
-    NSURL *staging=[job URLByAppendingPathComponent:@"assembled.pdf"];
-    if(![data writeToURL:staging options:NSDataWritingAtomic error:error])return nil;
-    NSDateFormatter *format=[NSDateFormatter new];format.locale=[NSLocale localeWithLocaleIdentifier:@"en_US_POSIX"];
-    format.dateFormat=@"yyyy-MM-dd HH.mm.ss";
-    NSString *name=[NSString stringWithFormat:@"Scan %@ %@%@.pdf",[format stringFromDate:NSDate.date],
-                    [NSUUID.UUID.UUIDString substringToIndex:8],partial?@" INCOMPLETE":@""];
-    NSURL *output=[folder URLByAppendingPathComponent:name];
-    if(renamex_np(staging.fileSystemRepresentation,output.fileSystemRepresentation,RENAME_EXCL)!=0){
-        if(error)*error=Failure([NSString stringWithFormat:@"Could not save the PDF (%s). Original pages are retained.",strerror(errno)]);
-        return nil;
-    }
-    return output;
-}
-
 @interface ScanJetApp : NSObject <NSApplicationDelegate,ICDeviceBrowserDelegate,ICScannerDeviceDelegate>
 @property NSStatusItem *item;
 @property NSMenu *menu;
@@ -64,7 +28,10 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
 @property NSURL *folder,*job,*jobFolder,*lastOutput;
 @property ICDeviceBrowser *browser;
 @property ICScannerDevice *scanner;
-@property PDFDocument *document;
+@property SJScanOutput *output;
+@property NSString *format,*quality;
+@property NSPopUpButton *formatPicker,*qualityPicker;
+@property NSMenuItem *formatMenu,*qualityMenu;
 @property NSTimer *pollTimer,*openTimer;
 @property BOOL duplex,buttons,busy,polling,armed,scanStarted,finishing,selecting,deviceReady,configured;
 @property NSString *state;
@@ -92,13 +59,15 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
         [self startScan];return;
     }
     NSUserDefaults *prefs=NSUserDefaults.standardUserDefaults;
-    [prefs registerDefaults:@{@"duplex":@YES,@"buttons":@YES}];
+    [prefs registerDefaults:@{@"duplex":@YES,@"buttons":@YES,@"format":@"pdf",@"quality":@"balanced"}];
     NSString *saved=[prefs stringForKey:@"folder"];
     self.folder=saved?[NSURL fileURLWithPath:saved isDirectory:YES]:
        [[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject URLByAppendingPathComponent:@"Scans" isDirectory:YES];
     self.duplex=[prefs boolForKey:@"duplex"];self.buttons=[prefs boolForKey:@"buttons"];
+    self.format=SJValidFormat([prefs stringForKey:@"format"])?[prefs stringForKey:@"format"]:@"pdf";
+    self.quality=SJValidQuality([prefs stringForKey:@"quality"])?[prefs stringForKey:@"quality"]:@"balanced";
     self.item=[NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
-    self.item.button.title=@"ScanJet";self.item.button.toolTip=@"ScanJet Button — fresh PDF per batch";
+    self.item.button.title=@"ScanJet";self.item.button.toolTip=@"ScanJet Button — fresh document per batch";
     self.menu=[NSMenu new];self.menu.autoenablesItems=NO;self.item.menu=self.menu;
     self.stateItem=[self add:@"Connecting…" action:NULL];self.stateItem.enabled=NO;
     [self add:@"Show controls…" action:@selector(showControls:)];
@@ -107,39 +76,60 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
     [self.menu addItem:NSMenuItem.separatorItem];
     self.buttonItem=[self add:@"Use front Scan button" action:@selector(toggleButtons:)];
     self.duplexItem=[self add:@"Scan both sides" action:@selector(toggleDuplex:)];
-    NSMenuItem *quality=[self add:@"Color · 300 dpi · US Letter · PDF" action:NULL];quality.enabled=NO;
+    self.formatMenu=[self add:@"Save as" action:NULL];self.formatMenu.submenu=[NSMenu new];self.formatMenu.submenu.autoenablesItems=NO;
+    for(NSString *title in @[@"PDF — one document",@"JPEG — one image per side"]){
+        NSMenuItem *entry=[[NSMenuItem alloc] initWithTitle:title action:@selector(changeFormat:) keyEquivalent:@""];
+        entry.target=self;entry.representedObject=self.formatMenu.submenu.itemArray.count==0?@"pdf":@"jpeg";[self.formatMenu.submenu addItem:entry];
+    }
+    self.qualityMenu=[self add:@"File size" action:NULL];self.qualityMenu.submenu=[NSMenu new];self.qualityMenu.submenu.autoenablesItems=NO;
+    NSArray *qualities=@[@"small",@"balanced",@"high"];
+    for(NSString *title in @[@"Smallest",@"Balanced",@"Higher quality"]){
+        NSMenuItem *entry=[[NSMenuItem alloc] initWithTitle:title action:@selector(changeQuality:) keyEquivalent:@""];
+        entry.target=self;entry.representedObject=qualities[self.qualityMenu.submenu.itemArray.count];[self.qualityMenu.submenu addItem:entry];
+    }
+    NSMenuItem *quality=[self add:@"Color · 300 dpi · US Letter" action:NULL];quality.enabled=NO;
     [self.menu addItem:NSMenuItem.separatorItem];
     self.folderItem=[self add:@"" action:NULL];self.folderItem.enabled=NO;
     [self add:@"Choose save folder…" action:@selector(chooseFolder:)];
     [self add:@"Open save folder" action:@selector(openFolder:)];
-    [self add:@"Show latest PDF" action:@selector(showLast:)];
+    [self add:@"Show latest scan" action:@selector(showLast:)];
     [self.menu addItem:NSMenuItem.separatorItem];
     self.quitItem=[self add:@"Quit ScanJet Button" action:@selector(quit:)];
-    [self buildWindow];[self update:@"Checking scanner…"];[self schedulePoll:0.1];[self showControls:nil];
+    [self buildWindow];[self update:self.buttons?@"Checking scanner…":@"Front button paused — manual scan available"];[self schedulePoll:0.1];[self showControls:nil];
 }
 - (void)buildWindow {
-    self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,460,335)
+    self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,500,465)
          styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
     self.window.title=@"ScanJet Button";self.window.releasedWhenClosed=NO;[self.window center];
     NSView *view=self.window.contentView;
-    NSTextField *title=[NSTextField labelWithString:@"A fresh PDF with each press"];
-    title.font=[NSFont boldSystemFontOfSize:20];title.frame=NSMakeRect(24,280,412,30);[view addSubview:title];
+    NSTextField *title=[NSTextField labelWithString:@"A fresh scan with each press"];
+    title.font=[NSFont boldSystemFontOfSize:20];title.frame=NSMakeRect(24,410,452,30);[view addSubview:title];
     NSTextField *subtitle=[NSTextField wrappingLabelWithString:@"Load your pages, then press the scanner’s front Scan button. You can close this window; ScanJet stays in the menu bar."];
-    subtitle.frame=NSMakeRect(24,228,412,46);[view addSubview:subtitle];
+    subtitle.frame=NSMakeRect(24,358,452,46);[view addSubview:subtitle];
     self.statusLabel=[NSTextField wrappingLabelWithString:@"Checking scanner…"];
-    self.statusLabel.font=[NSFont boldSystemFontOfSize:13];self.statusLabel.frame=NSMakeRect(24,188,412,32);[view addSubview:self.statusLabel];
+    self.statusLabel.font=[NSFont boldSystemFontOfSize:13];self.statusLabel.frame=NSMakeRect(24,318,452,32);[view addSubview:self.statusLabel];
     self.listenButton=[NSButton checkboxWithTitle:@"Use front Scan button" target:self action:@selector(toggleButtons:)];
-    self.listenButton.frame=NSMakeRect(24,152,225,24);[view addSubview:self.listenButton];
+    self.listenButton.frame=NSMakeRect(24,282,225,24);[view addSubview:self.listenButton];
     self.duplexButton=[NSButton checkboxWithTitle:@"Scan both sides" target:self action:@selector(toggleDuplex:)];
-    self.duplexButton.frame=NSMakeRect(255,152,180,24);[view addSubview:self.duplexButton];
-    self.folderLabel=[NSTextField labelWithString:@""];self.folderLabel.frame=NSMakeRect(24,121,412,22);
+    self.duplexButton.frame=NSMakeRect(275,282,200,24);[view addSubview:self.duplexButton];
+    NSTextField *formatLabel=[NSTextField labelWithString:@"Save as"];formatLabel.frame=NSMakeRect(24,243,90,22);[view addSubview:formatLabel];
+    self.formatPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,239,358,28) pullsDown:NO];
+    [self.formatPicker addItemsWithTitles:@[@"PDF — one document",@"JPEG — one image per side"]];
+    self.formatPicker.target=self;self.formatPicker.action=@selector(changeFormat:);[view addSubview:self.formatPicker];
+    NSTextField *sizeLabel=[NSTextField labelWithString:@"File size"];sizeLabel.frame=NSMakeRect(24,203,90,22);[view addSubview:sizeLabel];
+    self.qualityPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,199,358,28) pullsDown:NO];
+    [self.qualityPicker addItemsWithTitles:@[@"Smallest",@"Balanced (recommended)",@"Higher quality"]];
+    self.qualityPicker.target=self;self.qualityPicker.action=@selector(changeQuality:);[view addSubview:self.qualityPicker];
+    NSTextField *hint=[NSTextField wrappingLabelWithString:@"All sizes keep 300 dpi. Smaller files use stronger compression. JPEG saves numbered images in a new folder for each batch."];
+    hint.textColor=NSColor.secondaryLabelColor;hint.font=[NSFont systemFontOfSize:11];hint.frame=NSMakeRect(24,150,452,40);[view addSubview:hint];
+    self.folderLabel=[NSTextField labelWithString:@""];self.folderLabel.frame=NSMakeRect(24,121,452,22);
     self.folderLabel.lineBreakMode=NSLineBreakByTruncatingMiddle;[view addSubview:self.folderLabel];
     NSButton *choose=[NSButton buttonWithTitle:@"Choose folder…" target:self action:@selector(chooseFolder:)];
     choose.frame=NSMakeRect(18,82,145,32);[view addSubview:choose];
     NSButton *show=[NSButton buttonWithTitle:@"Open folder" target:self action:@selector(openFolder:)];
     show.frame=NSMakeRect(162,82,125,32);[view addSubview:show];
     self.scanButton=[NSButton buttonWithTitle:@"Scan new document" target:self action:@selector(manualScan:)];
-    self.scanButton.frame=NSMakeRect(244,24,192,34);[view addSubview:self.scanButton];
+    self.scanButton.frame=NSMakeRect(284,24,192,34);[view addSubview:self.scanButton];
     self.cancelButton=[NSButton buttonWithTitle:@"Cancel scan" target:self action:@selector(cancel:)];
     self.cancelButton.frame=NSMakeRect(18,24,135,34);[view addSubview:self.cancelButton];
 }
@@ -157,6 +147,12 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
     self.scanButton.enabled=!self.busy;self.cancelButton.enabled=self.cancelItem.enabled;
     self.listenButton.enabled=!self.busy;self.duplexButton.enabled=!self.busy;
     self.listenButton.state=self.buttonItem.state;self.duplexButton.state=self.duplexItem.state;
+    [self.formatPicker selectItemAtIndex:[self.format isEqual:@"jpeg"]?1:0];
+    [self.qualityPicker selectItemAtIndex:[@[@"small",@"balanced",@"high"] indexOfObject:self.quality]];
+    self.formatPicker.enabled=!self.busy;self.qualityPicker.enabled=!self.busy;
+    self.formatMenu.enabled=!self.busy;self.qualityMenu.enabled=!self.busy;
+    for(NSMenuItem *entry in self.formatMenu.submenu.itemArray){entry.state=[entry.representedObject isEqual:self.format]?NSControlStateValueOn:NSControlStateValueOff;entry.enabled=!self.busy;}
+    for(NSMenuItem *entry in self.qualityMenu.submenu.itemArray){entry.state=[entry.representedObject isEqual:self.quality]?NSControlStateValueOn:NSControlStateValueOff;entry.enabled=!self.busy;}
     if(self.workerMode)Emit(@{@"event":@"progress",@"message":text});
     NSLog(@"%@",text);
 }
@@ -201,7 +197,7 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
     NSURL *work=[self.jobFolder URLByAppendingPathComponent:@".scanjet-work" isDirectory:YES];
     self.job=[work URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
     if(![fm createDirectoryAtURL:self.job withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:&error]){[self finish:error];return;}
-    self.document=[PDFDocument new];
+    self.output=[[SJScanOutput alloc] initWithJob:self.job format:self.format quality:self.quality];
     self.browser=[ICDeviceBrowser new];self.browser.delegate=self;
     self.browser.browsedDeviceTypeMask=(ICDeviceTypeMask)(ICDeviceTypeMaskScanner|ICDeviceLocationTypeMaskLocal);
     [self.browser start];
@@ -214,7 +210,7 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
     // ImageCaptureCore failed to reconnect after stop/start in the same process
     // on the tested macOS 27 build. Keep one ICA lifetime per batch instead.
     self.worker=[NSTask new];self.worker.executableURL=NSBundle.mainBundle.executableURL;
-    self.worker.arguments=@[@"--scan-worker",self.folder.path,self.duplex?@"duplex":@"simplex"];
+    self.worker.arguments=@[@"--scan-worker",self.folder.path,self.duplex?@"duplex":@"simplex",self.format,self.quality];
     self.workerPipe=[NSPipe pipe];self.worker.standardOutput=self.workerPipe;
     self.worker.standardError=[NSFileHandle fileHandleWithNullDevice];
     self.workerBuffer=[NSMutableData data];self.workerResult=nil;
@@ -321,10 +317,9 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
 }
 - (void)scannerDevice:(ICScannerDevice *)scanner didScanToURL:(NSURL *)url {
     if(!self.busy||self.finishing)return;
-    PDFPage *page=PageFromImage(url);
-    if(!page){self.pageError=Failure(@"A scanned page could not be read. Original files have been retained.");[scanner cancelScan];return;}
-    [self.document insertPage:page atIndex:self.document.pageCount];
-    [self update:[NSString stringWithFormat:@"Scanning — %lu pages received",(unsigned long)self.document.pageCount]];
+    NSError *error=nil;
+    if(![self.output addImageAtURL:url error:&error]){self.pageError=error;[scanner cancelScan];return;}
+    [self update:[NSString stringWithFormat:@"Scanning — %lu pages received",(unsigned long)self.output.pageCount]];
 }
 - (void)scannerDevice:(ICScannerDevice *)scanner didCompleteScanWithError:(NSError *)error {[self finish:self.pageError?:error];}
 - (void)device:(ICDevice *)device didEncounterError:(NSError *)error {
@@ -332,28 +327,28 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
 }
 - (void)cancel:(id)sender {
     if(!self.workerMode){if(self.worker.running){[self.worker interrupt];[self update:@"Cancelling scan…"];}return;}
-    if(self.scanStarted&&!self.finishing){self.pageError=Failure(@"Scan cancelled. Any received pages are saved as an INCOMPLETE PDF.");[self.scanner cancelScan];[self update:@"Cancelling scan…"];}
+    if(self.scanStarted&&!self.finishing){self.pageError=Failure(@"Scan cancelled. Any received pages are saved with INCOMPLETE in the name.");[self.scanner cancelScan];[self update:@"Cancelling scan…"];}
 }
 - (void)finish:(NSError *)error {
     if(!self.busy||self.finishing)return;
     self.finishing=YES;[self.openTimer invalidate];
     NSError *saveError=nil;NSURL *output=nil;
-    if(self.document.pageCount)output=SavePDF(self.document,self.job,self.jobFolder,error!=nil,&saveError);
+    if(self.output.pageCount)output=[self.output saveToFolder:self.jobFolder partial:error!=nil error:&saveError];
     if(saveError)error=saveError;
-    if(output){self.lastOutput=output;NSLog(@"Saved %lu pages: %@",(unsigned long)self.document.pageCount,output.lastPathComponent);}
+    if(output){self.lastOutput=output;NSLog(@"Saved %lu pages: %@",(unsigned long)self.output.pageCount,output.lastPathComponent);}
     if(!output&&!error)error=Failure(@"No pages received. Load the feeder and try again.");
     if(output&&!error)[NSFileManager.defaultManager removeItemAtURL:self.job error:nil];
-    NSString *message=error?error.localizedDescription:[NSString stringWithFormat:@"Saved %lu pages — ready for a new document",(unsigned long)self.document.pageCount];
-    self.workerResult=@{@"event":@"done",@"pages":@(self.document.pageCount),@"output":output.path?:@"",@"error":error.localizedDescription?:@""};
+    NSString *message=error?error.localizedDescription:[NSString stringWithFormat:@"Saved %lu pages — ready for a new document",(unsigned long)self.output.pageCount];
+    self.workerResult=@{@"event":@"done",@"pages":@(self.output.pageCount),@"output":output.path?:@"",@"error":error.localizedDescription?:@""};
     [self update:message];
-    self.document=nil;
+    self.output=nil;
     if(self.scanner.hasOpenSession)[self.scanner requestCloseSession];
     else [self releaseScanner];
     if(error&&!self.workerMode){
         // An alert is reserved for a failed user-triggered scan, never idle polling.
         dispatch_async(dispatch_get_main_queue(),^{
             NSAlert *alert=[NSAlert new];alert.messageText=@"Scan needs attention";
-            alert.informativeText=output?[message stringByAppendingString:@"\nThe received pages are in an INCOMPLETE PDF in your save folder."]:
+            alert.informativeText=output?[message stringByAppendingString:@"\nThe received pages are in an INCOMPLETE scan in your save folder."]:
                 [message stringByAppendingString:@"\nAny original page files are kept in the save folder’s .scanjet-work directory."];
             [alert addButtonWithTitle:@"OK"];[NSApp activateIgnoringOtherApps:YES];[alert runModal];
         });
@@ -381,6 +376,16 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
 - (void)toggleDuplex:(id)sender {
     self.duplex=!self.duplex;[NSUserDefaults.standardUserDefaults setBool:self.duplex forKey:@"duplex"];[self update:self.state];
 }
+- (void)changeFormat:(id)sender {
+    if(self.busy)return;
+    self.format=[sender isKindOfClass:NSMenuItem.class]?[(NSMenuItem *)sender representedObject]: (self.formatPicker.indexOfSelectedItem==1?@"jpeg":@"pdf");
+    [NSUserDefaults.standardUserDefaults setObject:self.format forKey:@"format"];[self update:self.state];
+}
+- (void)changeQuality:(id)sender {
+    if(self.busy)return;
+    self.quality=[sender isKindOfClass:NSMenuItem.class]?[(NSMenuItem *)sender representedObject]:@[@"small",@"balanced",@"high"][self.qualityPicker.indexOfSelectedItem];
+    [NSUserDefaults.standardUserDefaults setObject:self.quality forKey:@"quality"];[self update:self.state];
+}
 - (void)chooseFolder:(id)sender {
     NSOpenPanel *panel=[NSOpenPanel openPanel];panel.canChooseFiles=NO;panel.canChooseDirectories=YES;
     panel.canCreateDirectories=YES;panel.allowsMultipleSelection=NO;panel.prompt=@"Save scans here";panel.directoryURL=self.folder;
@@ -395,27 +400,16 @@ static NSURL *SavePDF(PDFDocument *pdf,NSURL *job,NSURL *folder,BOOL partial,NSE
 - (void)quit:(id)sender {if(!self.busy)[NSApp terminate:nil];}
 @end
 
-static int SelfTest(void) {
-    NSFileManager *fm=NSFileManager.defaultManager;NSError *error=nil;
-    NSURL *root=[[NSURL fileURLWithPath:NSTemporaryDirectory() isDirectory:YES] URLByAppendingPathComponent:NSUUID.UUID.UUIDString];
-    [fm createDirectoryAtURL:root withIntermediateDirectories:YES attributes:nil error:&error];
-    PDFDocument *a=[PDFDocument new],*b=[PDFDocument new];
-    [a insertPage:[PDFPage new] atIndex:0];[a insertPage:[PDFPage new] atIndex:1];[b insertPage:[PDFPage new] atIndex:0];
-    NSURL *first=SavePDF(a,root,root,NO,&error),*second=SavePDF(b,root,root,NO,&error),*partial=SavePDF(b,root,root,YES,&error);
-    BOOL pass=first&&second&&partial&&![first isEqual:second]&&[[PDFDocument alloc] initWithURL:first].pageCount==2&&
-        [[PDFDocument alloc] initWithURL:second].pageCount==1&&[partial.lastPathComponent containsString:@"INCOMPLETE"];
-    NSError *emptyError=nil;pass=pass&&SavePDF([PDFDocument new],root,root,NO,&emptyError)==nil&&emptyError!=nil;
-    printf("separate_documents_and_partial_output=%s\n",pass?"PASS":"FAIL");
-    if(error)fprintf(stderr,"%s\n",error.localizedDescription.UTF8String);
-    [fm removeItemAtURL:root error:nil];return pass?0:1;
-}
 int main(int argc,const char **argv) {@autoreleasepool {
-    if(argc==2&&strcmp(argv[1],"--self-test")==0)return SelfTest();
+    if(argc==2&&strcmp(argv[1],"--self-test")==0)return SJOutputSelfTest();
+    if(argc>1&&(argc!=6||strcmp(argv[1],"--scan-worker")!=0))return 2;
     [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     ScanJetApp *delegate=[ScanJetApp new];
-    if(argc==4&&strcmp(argv[1],"--scan-worker")==0){
+    if(argc==6&&strcmp(argv[1],"--scan-worker")==0){
         delegate.workerMode=YES;delegate.folder=[NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[2]] isDirectory:YES];
         delegate.duplex=strcmp(argv[3],"duplex")==0;
+        delegate.format=[NSString stringWithUTF8String:argv[4]];delegate.quality=[NSString stringWithUTF8String:argv[5]];
+        if(!SJValidFormat(delegate.format)||!SJValidQuality(delegate.quality))return 2;
     }
     NSApp.delegate=delegate;[NSApp run];return 0;
 }}
