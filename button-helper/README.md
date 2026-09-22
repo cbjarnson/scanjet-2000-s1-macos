@@ -28,14 +28,73 @@ US Letter. Settings affect future scans only; existing files stay untouched.
 PDFs embed the compressed JPEG images, so they are substantially smaller than
 the lossless PDFs from v0.2.0. Actual size varies with the paper. Choose Higher
 quality when small details matter more than file size.
-No OCR, cleanup, blank-page deletion, or automatic opening of another app.
+Optional background processing is described below. Another app is not opened
+automatically.
 Close Image Capture or other scanner apps before using this helper.
 
-On a failed or cancelled scan, received pages are saved with `INCOMPLETE` in
-the PDF filename or JPEG folder name. Original page files remain in `.scanjet-work`
-under the save folder if a scan or output conversion fails. That folder is hidden in Finder;
-Command-Shift-period shows hidden files. Successful batches remove only their
-own temporary page files after validating and saving the output.
+## Background processing
+
+The scanner only captures the pages. Once it releases the scanner, the controls
+say **ready for the next scan** even if PDF/JPEG creation or OCR is still running.
+A separate status line reports batches processing or waiting. Only one background
+batch runs at a time, at reduced priority, using one OCR worker. No cloud API or
+upload is used by the helper.
+
+Each batch remembers the format, quality, destination, and processing choices that
+were selected when it started. Changing a setting affects the next batch. All
+processing options start off and are remembered when explicitly selected:
+
+- **Remove blank pages**: works for PDF and JPEG. A conservative full-page check
+  keeps pages with faint writing, colored marks, or dark borders. It may keep
+  noisy blank pages. If the entire batch looks blank, it keeps every page for review.
+- **Straighten pages (deskew)**: corrects slight skew in PDFs.
+- **Clean specks and noise**: gentle unpaper noise filtering in PDFs. Masking,
+  border removal, blur filtering, gray filtering, and black filtering are disabled
+  to protect content and avoid white patches on tinted paper.
+- **Auto-rotate PDF pages**: attempts to orient text correctly. Sparse text and
+  image-only pages may not provide enough evidence for automatic rotation.
+- **Searchable PDF (OCR)**: adds selectable/searchable English text locally.
+
+PDF-only options are disabled while JPEG is selected; their preferences are kept
+for when you return to PDF. Blank detection itself needs no external dependency.
+Deskew, cleanup, rotation, and OCR use [OCRmyPDF](https://github.com/ocrmypdf/OCRmyPDF),
+[Tesseract](https://github.com/tesseract-ocr/tesseract), and
+[unpaper](https://github.com/unpaper/unpaper). These are separately installed tools,
+not copied into this repository. Tested with OCRmyPDF 17.4.2 and unpaper 7.0.0.
+With Homebrew already installed, the optional dependencies can be installed with:
+
+```sh
+brew install ocrmypdf unpaper
+```
+
+The helper checks the usual Homebrew and MacPorts executable locations. Use
+OCRmyPDF 17.4 or newer. OCRmyPDF's [processing documentation](https://ocrmypdf.readthedocs.io/en/latest/cookbook.html#image-processing)
+explains the underlying tools. Final size and OCR accuracy depend on the pages;
+review cleaned output, especially faint handwriting and colored marks.
+
+## Originals, failures, and recovery
+
+When any processing option is active, an **unprocessed copy of every side** is
+saved in **Original scans** inside the selected save folder before filtering.
+It uses the selected PDF/JPEG format and compression quality. It is not an archival
+lossless TIFF backup. **Original scans** opens that folder. The finished document
+is saved alongside the other scans, in the selected destination. This keeps both
+versions and uses additional disk space. Existing scan documents are never edited.
+
+Failed or cancelled acquisitions keep the received pages in a batch marked
+**INCOMPLETE**. Processing failures retain raw TIFFs in `.scanjet-work` under the
+batch's original destination, along with `processing.log` if an external tool ran.
+Finder's Command-Shift-period shows hidden folders. **Retry processing** retries
+failed jobs; it does not rescan paper. Fix a missing dependency or unavailable save
+folder first. Completed documents are published atomically without overwriting an
+existing file. Original raw pages are removed only after successful publication
+and a saved completion record; interrupted acquisition keeps them.
+
+Queue records live in `~/Library/Application Support/ScanJet Button/Queue`.
+An interrupted processing job resumes when the helper is reopened. A running
+background worker can finish after closing the app; remaining queued jobs wait
+until it is reopened. Leave the helper running to drain the entire queue. No
+login item or system service is installed.
 
 ## Implementation evidence
 
@@ -68,7 +127,11 @@ Those v0.2.0 scans retained lossless images. Starting with v0.3.0, both formats
 use adjustable JPEG compression, with Balanced as the default. The build's
 offline tests check compression levels, JPEG dimensions and numbered output,
 PDF page count and compressed JPEG embedding, separate batches, partial-output
-names, rejecting duplicate publication, and empty or unreadable input. Those checks do not prove hardware
-scanning, restart behavior, reconnection, or paper-jam recovery.
-The separate physical and preference-persistence checks for v0.3.0 are recorded
+names, rejecting duplicate publication, and empty or unreadable input. The separate
+`tests/processing.py` integration suite runs synthetic documents through the actual
+OCRmyPDF/unpaper pipeline and checks blank removal, retained faint/color marks,
+OCR text, JPEG output, all-blank retention, publication recovery, and overwrite
+refusal. It requires Pillow, pikepdf, pypdfium2, and pdftotext. These checks do not
+prove physical scanning, USB reconnection, or paper-jam recovery.
+The separate physical and preference-persistence checks for each release are recorded
 in [release validation](../docs/TESTING.md).

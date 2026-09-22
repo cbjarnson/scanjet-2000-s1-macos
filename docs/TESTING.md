@@ -1,6 +1,6 @@
 # Release validation
 
-Version 0.3.0, 2026-09-22. Experimental source-only release.
+Version 0.4.0, 2026-09-22. Experimental source-only release.
 
 ## Helper checks performed
 
@@ -63,6 +63,34 @@ the driver or move paper. It is not a second independent hardware test.
 - JPEG file generation was tested offline; a physical acquisition with JPEG
   selected has not yet been tested. The confirmed physical front-button sequence
   above was tested in v0.2.0; the USB query and acquisition lifecycle are unchanged.
+
+## Background processing in v0.4.0
+
+- Native arm64 build and the existing encoding checks passed.
+- A synthetic four-page batch went through the actual installed OCRmyPDF 17.4.2
+  and unpaper 7.0.0. A blank side was removed; text, faint writing, and a small
+  colored mark were retained. The resulting three-page PDF had searchable text.
+- A skewed synthetic page was rendered after processing and appeared straight.
+  Default unpaper blur/mask filters initially produced white patches on tinted
+  paper. The cleanup arguments were narrowed to noise filtering, and a regression
+  check now rejects the observed patch artifact.
+- A second, separate job was enqueued while the first was processing. JPEG output,
+  all-blank retention, deskew/rotation without OCR, exclusive worker locking,
+  recovery after publication but before completion, and refusing to overwrite an
+  existing document passed. Failures retained raw input.
+- A separate 16-page synthetic job ran through the live app's background queue.
+  The UI continued to report the scanner ready and kept Scan new document enabled
+  while the OCRmyPDF and unpaper processes were running. It completed with 16 pages.
+- Blank removal, deskew, cleanup, and OCR selections persisted through restarting
+  the idle menu app; PDF/Balanced, duplex, and the selected destination also persisted.
+- The user reported a feeder error and blinking red light during the old v0.3.0
+  session. That scan received zero pages and hung waiting for session close. It
+  was cancelled and the stalled process stopped; the user subsequently reported
+  the scanner working again. A two-minute no-page timeout, bounded session close,
+  and direct error handling were added. These timeout/recovery changes are built
+  but have not yet been exercised in a physical jam test.
+- The pipeline tests use synthetic files. Physical capture with the new
+  queue, and the next physical scan while OCR is still working, remain unverified.
 
 ## Still unverified
 

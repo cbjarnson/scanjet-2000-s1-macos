@@ -46,8 +46,12 @@ menu-bar app. Each front-button press creates a fresh PDF by default, with duple
 on and a remembered save folder. You can explicitly select JPEG images instead;
 the format stays selected until you change it, including across app restarts.
 Smallest, Balanced (default), and Higher quality file-size settings retain 300 dpi.
-PDFs now embed compressed images. Existing scans are never recompressed. Close Image Capture and other scanner apps
-when using it. No OCR or cleanup is applied.
+PDFs embed compressed images. New batches go through a background queue, so you
+can scan again while earlier batches are being processed. Optional controls remove
+blank pages, deskew, gently clean specks, auto-rotate pages, and add searchable
+English text. PDF processing uses separately installed OCRmyPDF and unpaper;
+blank removal works for PDF and JPEG. Existing scans are never recompressed.
+Close Image Capture and other scanner apps when using the helper.
 
 Build from source with Apple's Command Line Tools or Xcode installed:
 

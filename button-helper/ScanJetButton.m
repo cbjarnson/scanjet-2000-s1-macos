@@ -4,6 +4,7 @@
 #import <PDFKit/PDFKit.h>
 #import <ImageIO/ImageIO.h>
 #import "ScanOutput.h"
+#import "ProcessingQueue.h"
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -28,7 +29,13 @@ static NSError *Failure(NSString *text) {
 @property NSURL *folder,*job,*jobFolder,*lastOutput;
 @property ICDeviceBrowser *browser;
 @property ICScannerDevice *scanner;
-@property SJScanOutput *output;
+@property NSMutableArray<NSString *> *capturedPages;
+@property NSDictionary *processing;
+@property NSArray<NSButton *> *processingButtons;
+@property NSTextField *processingLabel;
+@property NSButton *retryButton;
+@property NSTimer *queueTimer;
+@property NSTask *processor;
 @property NSString *format,*quality;
 @property NSPopUpButton *formatPicker,*qualityPicker;
 @property NSMenuItem *formatMenu,*qualityMenu;
@@ -42,6 +49,7 @@ static NSError *Failure(NSString *text) {
 @property NSMutableData *workerBuffer;
 @property NSDictionary *workerResult;
 @property NSTimer *cancelTimer;
+@property NSTimer *stallTimer,*closeTimer;
 @end
 
 @implementation ScanJetApp
@@ -66,6 +74,9 @@ static NSError *Failure(NSString *text) {
     self.duplex=[prefs boolForKey:@"duplex"];self.buttons=[prefs boolForKey:@"buttons"];
     self.format=SJValidFormat([prefs stringForKey:@"format"])?[prefs stringForKey:@"format"]:@"pdf";
     self.quality=SJValidQuality([prefs stringForKey:@"quality"])?[prefs stringForKey:@"quality"]:@"balanced";
+    NSMutableDictionary *processing=[NSMutableDictionary new];
+    for(NSString *key in @[@"blank",@"deskew",@"clean",@"ocr",@"rotate"])processing[key]=@([prefs boolForKey:key]);
+    self.processing=processing;
     self.item=[NSStatusBar.systemStatusBar statusItemWithLength:NSVariableStatusItemLength];
     self.item.button.title=@"ScanJet";self.item.button.toolTip=@"ScanJet Button — fresh document per batch";
     self.menu=[NSMenu new];self.menu.autoenablesItems=NO;self.item.menu=self.menu;
@@ -93,35 +104,61 @@ static NSError *Failure(NSString *text) {
     [self add:@"Choose save folder…" action:@selector(chooseFolder:)];
     [self add:@"Open save folder" action:@selector(openFolder:)];
     [self add:@"Show latest scan" action:@selector(showLast:)];
+    [self add:@"Show original scans" action:@selector(showOriginals:)];
     [self.menu addItem:NSMenuItem.separatorItem];
     self.quitItem=[self add:@"Quit ScanJet Button" action:@selector(quit:)];
-    [self buildWindow];[self update:self.buttons?@"Checking scanner…":@"Front button paused — manual scan available"];[self schedulePoll:0.1];[self showControls:nil];
+    [self buildWindow];
+    __weak ScanJetApp *weak=self;
+    self.queueTimer=[NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer){[weak refreshQueue];}];
+    [NSRunLoop.mainRunLoop addTimer:self.queueTimer forMode:NSRunLoopCommonModes];
+    [self refreshQueue];
+    [self update:self.buttons?@"Checking scanner…":@"Front button paused — manual scan available"];[self schedulePoll:0.1];[self showControls:nil];
 }
 - (void)buildWindow {
-    self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,500,465)
+    self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,500,700)
          styleMask:NSWindowStyleMaskTitled|NSWindowStyleMaskClosable backing:NSBackingStoreBuffered defer:NO];
     self.window.title=@"ScanJet Button";self.window.releasedWhenClosed=NO;[self.window center];
     NSView *view=self.window.contentView;
     NSTextField *title=[NSTextField labelWithString:@"A fresh scan with each press"];
-    title.font=[NSFont boldSystemFontOfSize:20];title.frame=NSMakeRect(24,410,452,30);[view addSubview:title];
+    title.font=[NSFont boldSystemFontOfSize:20];title.frame=NSMakeRect(24,645,452,30);[view addSubview:title];
     NSTextField *subtitle=[NSTextField wrappingLabelWithString:@"Load your pages, then press the scanner’s front Scan button. You can close this window; ScanJet stays in the menu bar."];
-    subtitle.frame=NSMakeRect(24,358,452,46);[view addSubview:subtitle];
+    subtitle.frame=NSMakeRect(24,593,452,46);[view addSubview:subtitle];
     self.statusLabel=[NSTextField wrappingLabelWithString:@"Checking scanner…"];
-    self.statusLabel.font=[NSFont boldSystemFontOfSize:13];self.statusLabel.frame=NSMakeRect(24,318,452,32);[view addSubview:self.statusLabel];
+    self.statusLabel.font=[NSFont boldSystemFontOfSize:13];self.statusLabel.frame=NSMakeRect(24,553,452,32);[view addSubview:self.statusLabel];
     self.listenButton=[NSButton checkboxWithTitle:@"Use front Scan button" target:self action:@selector(toggleButtons:)];
-    self.listenButton.frame=NSMakeRect(24,282,225,24);[view addSubview:self.listenButton];
+    self.listenButton.frame=NSMakeRect(24,517,225,24);[view addSubview:self.listenButton];
     self.duplexButton=[NSButton checkboxWithTitle:@"Scan both sides" target:self action:@selector(toggleDuplex:)];
-    self.duplexButton.frame=NSMakeRect(275,282,200,24);[view addSubview:self.duplexButton];
-    NSTextField *formatLabel=[NSTextField labelWithString:@"Save as"];formatLabel.frame=NSMakeRect(24,243,90,22);[view addSubview:formatLabel];
-    self.formatPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,239,358,28) pullsDown:NO];
+    self.duplexButton.frame=NSMakeRect(275,517,200,24);[view addSubview:self.duplexButton];
+    NSTextField *formatLabel=[NSTextField labelWithString:@"Save as"];formatLabel.frame=NSMakeRect(24,478,90,22);[view addSubview:formatLabel];
+    self.formatPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,474,593,28) pullsDown:NO];
     [self.formatPicker addItemsWithTitles:@[@"PDF — one document",@"JPEG — one image per side"]];
     self.formatPicker.target=self;self.formatPicker.action=@selector(changeFormat:);[view addSubview:self.formatPicker];
-    NSTextField *sizeLabel=[NSTextField labelWithString:@"File size"];sizeLabel.frame=NSMakeRect(24,203,90,22);[view addSubview:sizeLabel];
-    self.qualityPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,199,358,28) pullsDown:NO];
+    NSTextField *sizeLabel=[NSTextField labelWithString:@"File size"];sizeLabel.frame=NSMakeRect(24,438,90,22);[view addSubview:sizeLabel];
+    self.qualityPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,434,593,28) pullsDown:NO];
     [self.qualityPicker addItemsWithTitles:@[@"Smallest",@"Balanced (recommended)",@"Higher quality"]];
     self.qualityPicker.target=self;self.qualityPicker.action=@selector(changeQuality:);[view addSubview:self.qualityPicker];
     NSTextField *hint=[NSTextField wrappingLabelWithString:@"All sizes keep 300 dpi. Smaller files use stronger compression. JPEG saves numbered images in a new folder for each batch."];
-    hint.textColor=NSColor.secondaryLabelColor;hint.font=[NSFont systemFontOfSize:11];hint.frame=NSMakeRect(24,150,452,40);[view addSubview:hint];
+    hint.textColor=NSColor.secondaryLabelColor;hint.font=[NSFont systemFontOfSize:11];hint.frame=NSMakeRect(24,385,452,40);[view addSubview:hint];
+    NSTextField *heading=[NSTextField labelWithString:@"After scanning — in the background"];
+    heading.font=[NSFont boldSystemFontOfSize:13];heading.frame=NSMakeRect(24,356,452,22);[view addSubview:heading];
+    NSArray *titles=@[@"Remove blank pages",@"Straighten pages (deskew)",@"Clean specks and noise",@"Searchable PDF (OCR)",@"Auto-rotate PDF pages"];
+    NSArray *keys=@[@"blank",@"deskew",@"clean",@"ocr",@"rotate"];
+    NSMutableArray *buttons=[NSMutableArray new];
+    for(NSUInteger i=0;i<titles.count;i++){
+        NSButton *button=[NSButton checkboxWithTitle:titles[i] target:self action:@selector(changeProcessing:)];
+        button.identifier=keys[i];button.frame=NSMakeRect(i==3||i==4?267:24,i==0?327:(i==1||i==4?297:267),225,24);
+        [view addSubview:button];[buttons addObject:button];
+    }
+    self.processingButtons=buttons;
+    NSTextField *processingHint=[NSTextField wrappingLabelWithString:@"Originals are kept in Original scans. Review cleaned pages for faint marks. Deskew, cleanup, rotation and OCR apply to PDFs; OCR uses English."];
+    processingHint.font=[NSFont systemFontOfSize:11];processingHint.textColor=NSColor.secondaryLabelColor;
+    processingHint.frame=NSMakeRect(24,217,452,42);[view addSubview:processingHint];
+    self.processingLabel=[NSTextField wrappingLabelWithString:@"Processing queue is empty"];
+    self.processingLabel.frame=NSMakeRect(24,177,452,36);[view addSubview:self.processingLabel];
+    self.retryButton=[NSButton buttonWithTitle:@"Retry processing" target:self action:@selector(retryProcessing:)];
+    self.retryButton.frame=NSMakeRect(18,142,155,30);[view addSubview:self.retryButton];
+    NSButton *originals=[NSButton buttonWithTitle:@"Original scans" target:self action:@selector(showOriginals:)];
+    originals.frame=NSMakeRect(177,142,145,30);[view addSubview:originals];
     self.folderLabel=[NSTextField labelWithString:@""];self.folderLabel.frame=NSMakeRect(24,121,452,22);
     self.folderLabel.lineBreakMode=NSLineBreakByTruncatingMiddle;[view addSubview:self.folderLabel];
     NSButton *choose=[NSButton buttonWithTitle:@"Choose folder…" target:self action:@selector(chooseFolder:)];
@@ -153,6 +190,10 @@ static NSError *Failure(NSString *text) {
     self.formatMenu.enabled=!self.busy;self.qualityMenu.enabled=!self.busy;
     for(NSMenuItem *entry in self.formatMenu.submenu.itemArray){entry.state=[entry.representedObject isEqual:self.format]?NSControlStateValueOn:NSControlStateValueOff;entry.enabled=!self.busy;}
     for(NSMenuItem *entry in self.qualityMenu.submenu.itemArray){entry.state=[entry.representedObject isEqual:self.quality]?NSControlStateValueOn:NSControlStateValueOff;entry.enabled=!self.busy;}
+    for(NSButton *button in self.processingButtons){
+        button.state=[self.processing[button.identifier] boolValue]?NSControlStateValueOn:NSControlStateValueOff;
+        button.enabled=!self.busy&&([button.identifier isEqual:@"blank"]||[self.format isEqual:@"pdf"]);
+    }
     if(self.workerMode)Emit(@{@"event":@"progress",@"message":text});
     NSLog(@"%@",text);
 }
@@ -197,7 +238,7 @@ static NSError *Failure(NSString *text) {
     NSURL *work=[self.jobFolder URLByAppendingPathComponent:@".scanjet-work" isDirectory:YES];
     self.job=[work URLByAppendingPathComponent:NSUUID.UUID.UUIDString isDirectory:YES];
     if(![fm createDirectoryAtURL:self.job withIntermediateDirectories:YES attributes:@{NSFilePosixPermissions:@0700} error:&error]){[self finish:error];return;}
-    self.output=[[SJScanOutput alloc] initWithJob:self.job format:self.format quality:self.quality];
+    self.capturedPages=[NSMutableArray new];
     self.browser=[ICDeviceBrowser new];self.browser.delegate=self;
     self.browser.browsedDeviceTypeMask=(ICDeviceTypeMask)(ICDeviceTypeMaskScanner|ICDeviceLocationTypeMaskLocal);
     [self.browser start];
@@ -210,7 +251,8 @@ static NSError *Failure(NSString *text) {
     // ImageCaptureCore failed to reconnect after stop/start in the same process
     // on the tested macOS 27 build. Keep one ICA lifetime per batch instead.
     self.worker=[NSTask new];self.worker.executableURL=NSBundle.mainBundle.executableURL;
-    self.worker.arguments=@[@"--scan-worker",self.folder.path,self.duplex?@"duplex":@"simplex",self.format,self.quality];
+    NSString *settings=[[NSString alloc] initWithData:[NSJSONSerialization dataWithJSONObject:self.processing options:0 error:nil] encoding:NSUTF8StringEncoding];
+    self.worker.arguments=@[@"--scan-worker",self.folder.path,self.duplex?@"duplex":@"simplex",self.format,self.quality,settings];
     self.workerPipe=[NSPipe pipe];self.worker.standardOutput=self.workerPipe;
     self.worker.standardError=[NSFileHandle fileHandleWithNullDevice];
     self.workerBuffer=[NSMutableData data];self.workerResult=nil;
@@ -247,10 +289,10 @@ static NSError *Failure(NSString *text) {
     if(!result)error=@"The scan process stopped unexpectedly. Any received page files remain in .scanjet-work under the save folder.";
     NSString *path=result[@"output"];
     if(path.length)self.lastOutput=[NSURL fileURLWithPath:path];
-    NSString *message=error.length?error:[NSString stringWithFormat:@"Saved %@ pages — ready for a new document",result[@"pages"]?:@0];
+    NSString *message=error.length?error:[NSString stringWithFormat:@"Captured %@ pages — ready for the next scan",result[@"pages"]?:@0];
     self.workerPipe=nil;self.worker=nil;self.workerBuffer=nil;
     self.busy=NO;self.scanStarted=NO;self.finishing=NO;self.armed=NO;
-    [self update:message];[self schedulePoll:1.5];
+    [self update:message];[self schedulePoll:1.5];[self refreshQueue];
     if(error.length){
         NSAlert *alert=[NSAlert new];alert.messageText=@"Scan needs attention";
         alert.informativeText=message;[alert addButtonWithTitle:@"OK"];
@@ -313,52 +355,59 @@ static NSError *Failure(NSString *text) {
         dispatch_after(dispatch_time(DISPATCH_TIME_NOW,250*NSEC_PER_MSEC),dispatch_get_main_queue(),^{[self beginAcquisitionWhenReady];});return;
     }
     [self.openTimer invalidate];self.scanStarted=YES;[self update:@"Scanning — 0 pages received"];
+    [self resetStallTimer];
     [self.scanner requestScan];
+}
+- (void)resetStallTimer {
+    [self.stallTimer invalidate];__weak ScanJetApp *weak=self;
+    self.stallTimer=[NSTimer scheduledTimerWithTimeInterval:120 repeats:NO block:^(NSTimer *timer){
+        ScanJetApp *app=weak;
+        if(app.busy&&!app.finishing){[app.scanner cancelScan];[app finish:Failure(@"No page arrived for two minutes. Check for a paper jam and close the feeder cover. Received pages are retained.")];}
+    }];
 }
 - (void)scannerDevice:(ICScannerDevice *)scanner didScanToURL:(NSURL *)url {
     if(!self.busy||self.finishing)return;
-    NSError *error=nil;
-    if(![self.output addImageAtURL:url error:&error]){self.pageError=error;[scanner cancelScan];return;}
-    [self update:[NSString stringWithFormat:@"Scanning — %lu pages received",(unsigned long)self.output.pageCount]];
+    [self resetStallTimer];
+    [self.capturedPages addObject:url.path];
+    [self update:[NSString stringWithFormat:@"Scanning — %lu pages received",(unsigned long)self.capturedPages.count]];
 }
 - (void)scannerDevice:(ICScannerDevice *)scanner didCompleteScanWithError:(NSError *)error {[self finish:self.pageError?:error];}
 - (void)device:(ICDevice *)device didEncounterError:(NSError *)error {
-    if(!self.scanStarted)[self finish:error];else NSLog(@"Scanner reported: %@",error.localizedDescription);
+    if(error&&!self.finishing){if(self.scanStarted)[self.scanner cancelScan];[self finish:error];}
 }
 - (void)cancel:(id)sender {
     if(!self.workerMode){if(self.worker.running){[self.worker interrupt];[self update:@"Cancelling scan…"];}return;}
-    if(self.scanStarted&&!self.finishing){self.pageError=Failure(@"Scan cancelled. Any received pages are saved with INCOMPLETE in the name.");[self.scanner cancelScan];[self update:@"Cancelling scan…"];}
+    if(self.scanStarted&&!self.finishing){self.pageError=Failure(@"Scan cancelled. Any received pages are saved with INCOMPLETE in the name.");[self.scanner cancelScan];[self finish:self.pageError];}
 }
 - (void)finish:(NSError *)error {
     if(!self.busy||self.finishing)return;
-    self.finishing=YES;[self.openTimer invalidate];
-    NSError *saveError=nil;NSURL *output=nil;
-    if(self.output.pageCount)output=[self.output saveToFolder:self.jobFolder partial:error!=nil error:&saveError];
-    if(saveError)error=saveError;
-    if(output){self.lastOutput=output;NSLog(@"Saved %lu pages: %@",(unsigned long)self.output.pageCount,output.lastPathComponent);}
-    if(!output&&!error)error=Failure(@"No pages received. Load the feeder and try again.");
-    if(output&&!error)[NSFileManager.defaultManager removeItemAtURL:self.job error:nil];
-    NSString *message=error?error.localizedDescription:[NSString stringWithFormat:@"Saved %lu pages — ready for a new document",(unsigned long)self.output.pageCount];
-    self.workerResult=@{@"event":@"done",@"pages":@(self.output.pageCount),@"output":output.path?:@"",@"error":error.localizedDescription?:@""};
-    [self update:message];
-    self.output=nil;
-    if(self.scanner.hasOpenSession)[self.scanner requestCloseSession];
-    else [self releaseScanner];
-    if(error&&!self.workerMode){
-        // An alert is reserved for a failed user-triggered scan, never idle polling.
-        dispatch_async(dispatch_get_main_queue(),^{
-            NSAlert *alert=[NSAlert new];alert.messageText=@"Scan needs attention";
-            alert.informativeText=output?[message stringByAppendingString:@"\nThe received pages are in an INCOMPLETE scan in your save folder."]:
-                [message stringByAppendingString:@"\nAny original page files are kept in the save folder’s .scanjet-work directory."];
-            [alert addButtonWithTitle:@"OK"];[NSApp activateIgnoringOtherApps:YES];[alert runModal];
-        });
+    self.finishing=YES;[self.openTimer invalidate];[self.stallTimer invalidate];
+    NSError *queueError=nil;NSURL *manifest=nil;
+    if(self.capturedPages.count){
+        NSMutableDictionary *settings=[self.processing mutableCopy];settings[@"format"]=self.format;settings[@"quality"]=self.quality;
+        manifest=SJEnqueueScan(self.job,self.jobFolder,self.capturedPages,settings,error.localizedDescription,&queueError);
     }
+    if(queueError)error=queueError;
+    if(!manifest&&!error)error=Failure(@"No pages received. Load the feeder and try again.");
+    self.workerResult=@{@"event":@"done",@"pages":@(self.capturedPages.count),@"queued":manifest.path?:@"",@"error":error.localizedDescription?:@""};
+    [self update:error?error.localizedDescription:@"Pages queued — releasing scanner"];
+    if(self.scanner.hasOpenSession){
+        __weak ScanJetApp *weak=self;
+        self.closeTimer=[NSTimer scheduledTimerWithTimeInterval:6 repeats:NO block:^(NSTimer *timer){
+            ScanJetApp *app=weak;if(!app.finishing)return;
+            NSMutableDictionary *result=[app.workerResult mutableCopy];
+            if(![result[@"error"] length])result[@"error"]=@"The scanner did not close its session. Restart it before scanning again; captured pages remain queued.";
+            app.workerResult=result;[app releaseScanner];
+        }];
+        [self.scanner requestCloseSession];
+    }else [self releaseScanner];
 }
 - (void)device:(ICDevice *)device didCloseSessionWithError:(NSError *)error {
     if(!self.finishing){[self finish:error?:Failure(@"The scan session closed unexpectedly.")];return;}
     [self releaseScanner];
 }
 - (void)releaseScanner {
+    [self.closeTimer invalidate];[self.stallTimer invalidate];
     [self.browser stop];self.browser.delegate=nil;self.browser=nil;self.scanner.delegate=nil;self.scanner=nil;
     self.busy=NO;self.finishing=NO;self.scanStarted=NO;self.job=nil;
     if(self.workerMode){
@@ -386,6 +435,40 @@ static NSError *Failure(NSString *text) {
     self.quality=[sender isKindOfClass:NSMenuItem.class]?[(NSMenuItem *)sender representedObject]:@[@"small",@"balanced",@"high"][self.qualityPicker.indexOfSelectedItem];
     [NSUserDefaults.standardUserDefaults setObject:self.quality forKey:@"quality"];[self update:self.state];
 }
+- (void)changeProcessing:(NSButton *)sender {
+    if(self.busy)return;
+    NSMutableDictionary *settings=[self.processing mutableCopy];settings[sender.identifier]=@(sender.state==NSControlStateValueOn);self.processing=settings;
+    [NSUserDefaults.standardUserDefaults setBool:[settings[sender.identifier] boolValue] forKey:sender.identifier];[self update:self.state];
+}
+- (void)refreshQueue {
+    if(self.workerMode)return;
+    NSArray *jobs=SJQueueJobs();NSUInteger pending=0,failed=0;NSDictionary *next=nil,*latest=nil,*failure=nil;
+    for(NSDictionary *job in jobs){
+        NSString *state=job[@"state"];
+        if([state isEqual:@"queued"]||[state isEqual:@"processing"]){pending++;if(!next)next=job;}
+        if([state isEqual:@"failed"]){failed++;failure=job;}
+        if([state isEqual:@"done"])latest=job;
+    }
+    if(latest[@"output"])self.lastOutput=[NSURL fileURLWithPath:latest[@"output"]];
+    self.retryButton.enabled=failed>0;
+    if(pending)self.processingLabel.stringValue=[NSString stringWithFormat:@"%lu batch%@ processing or waiting. You can scan again.%@",(unsigned long)pending,pending==1?@"":@"es",failed?@" Some batches need retry.":@""];
+    else if(failed)self.processingLabel.stringValue=[NSString stringWithFormat:@"%lu batch%@ need retry. %@",(unsigned long)failed,failed==1?@"":@"es",failure[@"error"]?:@"Originals are retained."];
+    else if(latest)self.processingLabel.stringValue=[NSString stringWithFormat:@"Latest: %@ pages saved, %lu blank removed.%@",latest[@"outputPages"]?:@0,(unsigned long)[latest[@"removedPages"] count],latest[@"notice"]?@" Review this batch.":@""];
+    else self.processingLabel.stringValue=@"Processing queue is empty. New scans process in the background.";
+    self.processingLabel.toolTip=self.processingLabel.stringValue;
+    if(next&&!self.processor.running&&SJQueueAvailable()){
+        self.processor=[NSTask new];self.processor.executableURL=NSBundle.mainBundle.executableURL;
+        self.processor.arguments=@[@"--process-job",next[@"manifest"]];
+        self.processor.standardOutput=[NSFileHandle fileHandleWithNullDevice];self.processor.standardError=[NSFileHandle fileHandleWithNullDevice];
+        NSError *error=nil;if(![self.processor launchAndReturnError:&error])self.processingLabel.stringValue=error.localizedDescription;
+    }
+}
+- (void)retryProcessing:(id)sender {SJRetryFailedJobs();[self refreshQueue];}
+- (void)showOriginals:(id)sender {
+    NSURL *folder=[self.folder URLByAppendingPathComponent:@"Original scans"];
+    if([NSFileManager.defaultManager createDirectoryAtURL:folder withIntermediateDirectories:YES attributes:nil error:nil])
+        [NSWorkspace.sharedWorkspace openURL:folder];
+}
 - (void)chooseFolder:(id)sender {
     NSOpenPanel *panel=[NSOpenPanel openPanel];panel.canChooseFiles=NO;panel.canChooseDirectories=YES;
     panel.canCreateDirectories=YES;panel.allowsMultipleSelection=NO;panel.prompt=@"Save scans here";panel.directoryURL=self.folder;
@@ -402,14 +485,17 @@ static NSError *Failure(NSString *text) {
 
 int main(int argc,const char **argv) {@autoreleasepool {
     if(argc==2&&strcmp(argv[1],"--self-test")==0)return SJOutputSelfTest();
-    if(argc>1&&(argc!=6||strcmp(argv[1],"--scan-worker")!=0))return 2;
+    if(argc==3&&strcmp(argv[1],"--process-job")==0)return SJProcessJob([NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[2]]]);
+    if(argc>1&&(argc!=7||strcmp(argv[1],"--scan-worker")!=0))return 2;
     [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
     ScanJetApp *delegate=[ScanJetApp new];
-    if(argc==6&&strcmp(argv[1],"--scan-worker")==0){
+    if(argc==7&&strcmp(argv[1],"--scan-worker")==0){
         delegate.workerMode=YES;delegate.folder=[NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[2]] isDirectory:YES];
         delegate.duplex=strcmp(argv[3],"duplex")==0;
         delegate.format=[NSString stringWithUTF8String:argv[4]];delegate.quality=[NSString stringWithUTF8String:argv[5]];
-        if(!SJValidFormat(delegate.format)||!SJValidQuality(delegate.quality))return 2;
+        NSData *settings=[[NSString stringWithUTF8String:argv[6]] dataUsingEncoding:NSUTF8StringEncoding];
+        delegate.processing=[NSJSONSerialization JSONObjectWithData:settings options:0 error:nil];
+        if(![delegate.processing isKindOfClass:NSDictionary.class]||!SJValidFormat(delegate.format)||!SJValidQuality(delegate.quality))return 2;
     }
     NSApp.delegate=delegate;[NSApp run];return 0;
 }}

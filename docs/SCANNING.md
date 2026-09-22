@@ -22,6 +22,15 @@ stays selected until you change it. **File size** offers Smallest, Balanced
 restarting the helper and affect both the front button and the on-screen scan
 button. Existing files are left untouched.
 
+The **After scanning** options add blank-page removal, deskew, gentle speck cleanup,
+auto-rotation, and searchable English PDFs. They are optional and remembered.
+Blank removal also works for JPEG; the other options apply to PDF. Processing
+runs locally in a separate queue. Once the scanner has released the pages, load
+the next document and scan again while earlier batches finish. An unprocessed
+copy is saved under **Original scans** when processing is selected. See the
+[helper instructions](../button-helper/README.md#background-processing) for the
+optional OCRmyPDF/unpaper dependencies and recovery controls.
+
 Its **Choose save folder…** control remembers the destination;
 **Scan both sides** controls duplex. The default save folder is Documents/Scans.
 The helper can stay in the menu bar with its window closed. It must remain running,
