@@ -1,0 +1,17 @@
+.DS_Store
+downloads/
+extracted/
+staged/
+backups/
+reports/
+scans/
+work/
+dist/
+*.pkg
+*.dmg
+*.app/
+*.pdf
+*.png
+*.jpg
+*.log
+.env*
