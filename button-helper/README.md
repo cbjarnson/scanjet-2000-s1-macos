@@ -13,6 +13,8 @@ The **ScanJet** menu in the menu bar offers:
 - **Scan a new document**: starts one batch without using Image Capture.
 - **Use front Scan button**: enables or pauses the hardware trigger.
 - **Scan both sides**: duplex on by default; turn it off for simplex.
+- **Recover after jam…**: after clearing the paper path and closing the cover,
+  releases a stuck scan, reconnects this scanner through USB, and checks readiness.
 - **Choose save folder…**: defaults to `~/Documents/Scans` and remembers changes.
 - **Save as**: PDF by default, or JPEG when you explicitly choose it. The choice
   stays selected for future scans and after restarting until you change it.
@@ -73,6 +75,36 @@ explains the underlying tools. Final size and OCR accuracy depend on the pages;
 review cleaned output, especially faint handwriting and colored marks.
 
 ## Originals, failures, and recovery
+
+### Paper jams and a blinking red light
+
+Remove jammed paper and any scraps, then firmly latch both sides of the feeder
+cover. Close Image Capture and other scanner apps. Click **Recover after jam…**
+in the controls or the ScanJet menu. It stops this helper's active capture, releases
+the old HP Scanner 4 service, asks macOS to reconnect this scanner's USB connection,
+then opens and closes a session to check readiness. It does not start feeding paper.
+Background processing and saved documents are left alone.
+
+Scanning is disabled during recovery. After an acquisition error or failed recovery,
+it stays paused, even across an app restart, until recovery succeeds. Successful
+recovery restores your front-button preference and requires a fresh button press.
+Check that the red light is off before scanning. Received pages from an interrupted
+capture remain available, either queued as INCOMPLETE or retained as raw files.
+
+This is a connection reset, not a way to bypass paper-path or cover sensors. It
+cleared the light in one user-confirmed post-jam test on the development Mac; it
+cannot guarantee recovery from every jam. If the light persists, disconnect both
+**power and USB** for 30 seconds, check the paper path/cover, and reconnect. Merely
+disconnecting USB does not remove power. A blinking light with power only needs
+physical troubleshooting; see [HP's troubleshooting guide](https://support.hp.com/ca-en/document/c05294207).
+
+Recovery only targets USB `03f0:5905` and refuses if more than one is connected.
+It uses an ordinary USB open, never a forced seizure, and restarts only the exact
+installed HP Scanner 4 process owned by the current user. Image Capture and HP
+Utility must be closed by you. No firmware, calibration, motor, security setting,
+or installed HP file is changed.
+
+### Saved pages and processing failures
 
 When any processing option is active, an **unprocessed copy of every side** is
 saved in **Original scans** inside the selected save folder before filtering.

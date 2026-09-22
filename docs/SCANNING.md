@@ -41,3 +41,18 @@ document without restarting the app. It leaves HP's built-in button configuratio
 unchanged. [HP also documents assigning buttons through HP Utility](https://support.hp.com/gb-en/document/c05294082),
 but that panel returned error 4294967249 during testing. The community helper is
 an independent alternative; it does not repair HP Utility's button workflow.
+
+## After a paper jam
+
+1. Remove the jam and any scraps, then press both sides of the feeder cover closed.
+2. Close Image Capture and other scanner apps.
+3. Click **Recover after jam…** in ScanJet's window, beside **Open folder**, or in
+   its menu-bar menu. Wait for **Connection ready** and check that the red light
+   is off. Recovery does not feed paper or interrupt the background OCR queue.
+4. Reload the document and start a fresh scan. Check any INCOMPLETE output from
+   the interrupted batch before rescanning to avoid keeping duplicate pages.
+
+If recovery fails, scanning stays paused until a successful retry. If the red
+light stays on, disconnect **both the power cable and USB** for 30 seconds and
+recheck the paper path and cover. Software cannot bypass a physical jam or cover
+fault. See the [recovery details](../button-helper/README.md#paper-jams-and-a-blinking-red-light).

@@ -52,6 +52,9 @@ blank pages, deskew, gently clean specks, auto-rotate pages, and add searchable
 English text. PDF processing uses separately installed OCRmyPDF and unpaper;
 blank removal works for PDF and JPEG. Existing scans are never recompressed.
 Close Image Capture and other scanner apps when using the helper.
+After clearing a jam, **Recover after jam…** reconnects the scanner and checks
+readiness without feeding paper or stopping the OCR queue. This cleared the red
+light in one confirmed post-jam test; physical paper/cover faults still need attention.
 
 Build from source with Apple's Command Line Tools or Xcode installed:
 
@@ -77,7 +80,8 @@ duplex PDF creation have been physically tested on the same Mac only.
 | Existing HP files after addition | 10,811 original file/link entries unchanged |
 | Front button via optional helper | Passed; a fresh two-page duplex PDF after an earlier batch, without restarting the helper |
 | Save-folder choice and separate PDFs | Passed; earlier PDF hashes unchanged |
-| Reboot, physical cancel, USB reconnect recovery | Not tested |
+| Software USB reconnect and readiness check | Passed on this Mac; user confirmed red light off after a jam |
+| Reboot, physical cancellation | Not tested |
 | Fresh Mac without earlier HP software | Not tested |
 | Native ARM64 backend / macOS 28 | Not provided |
 

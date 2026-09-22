@@ -1,6 +1,6 @@
 # Release validation
 
-Version 0.4.0, 2026-09-22. Experimental source-only release.
+Version 0.4.1, 2026-09-22. Experimental source-only release.
 
 ## Helper checks performed
 
@@ -89,14 +89,39 @@ the driver or move paper. It is not a second independent hardware test.
   the scanner working again. A two-minute no-page timeout, bounded session close,
   and direct error handling were added. These timeout/recovery changes are built
   but have not yet been exercised in a physical jam test.
-- The pipeline tests use synthetic files. Physical capture with the new
-  queue, and the next physical scan while OCR is still working, remain unverified.
+- At the v0.4.0 release, the pipeline tests used synthetic files. Physical capture
+  with the new queue and the next physical scan during OCR were still unverified.
+
+## Jam recovery in v0.4.1
+
+- Native arm64 compilation, the existing output checks, and a focused check of
+  the driver process path/owner restrictions passed.
+- After the user reported another jam and a persistent blinking light despite
+  cycling power and USB, the new recovery worker requested a standard macOS USB
+  re-enumeration of the single connected 03f0:5905. It then opened an ICA session,
+  received readiness, and closed the session normally. It exited successfully,
+  reporting both USB reconnect and readiness success. No paper was fed.
+- The user then reported **light is off**. This is one observed recovery on the
+  original Mac, not proof that software clears every physical or latched fault.
+- The project-local app's Recover after jam control was then clicked. Scan and
+  front-button controls were disabled during recovery; the app logged Connection
+  ready after about 12 seconds. PDF/Balanced, duplex, destination, and processing
+  preferences remained intact. Front-button listening was restored through the UI.
+- Two subsequent physical acquisitions, with two and four sides respectively,
+  completed through the background queue. All 70 earlier completed queue records
+  kept the same hashes. This checks queue preservation, not every output image.
+- Acquisition errors now pause scanning and offer recovery instead of repeatedly
+  blaming other apps. The paused state persists across restarts. Recovery runs
+  separately from the background processing queue and never starts a scan.
+- Format and size dropdowns were narrowed to fit the controls window.
 
 ## Still unverified
 
 Another Mac, a clean Mac without previous HP components, Finder copy by an external
-tester, rollback, cancellation, sleep/reboot/reconnect recovery, direct NAPS2
+tester, rollback, cancellation, sleep/reboot recovery, direct NAPS2
 scanning, physical cancellation/partial-output recovery, held/double button presses,
-and button operation after sleep or unplug/reconnect. The HP Utility Scan Button panel exists
+and button operation after sleep or physical unplug/reconnect. Recovery during an
+active jammed acquisition, forced worker termination, and repeated jam recovery
+remain unverified. The HP Utility Scan Button panel exists
 for the scanner on the test Mac, but returned Image Capture error 4294967249 when
 opened with Image Capture also running. The cause has not been established.

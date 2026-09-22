@@ -5,6 +5,7 @@
 #import <ImageIO/ImageIO.h>
 #import "ScanOutput.h"
 #import "ProcessingQueue.h"
+#import "ScannerRecovery.h"
 #include <stdio.h>
 #include <errno.h>
 #include <signal.h>
@@ -50,6 +51,12 @@ static NSError *Failure(NSString *text) {
 @property NSDictionary *workerResult;
 @property NSTimer *cancelTimer;
 @property NSTimer *stallTimer,*closeTimer;
+@property NSButton *recoveryButton;
+@property NSMenuItem *recoveryItem;
+@property BOOL recovering,needsRecovery;
+@property NSTask *recoveryTask;
+@property NSTimer *recoveryTimer;
+@property NSDate *recoveryDeadline;
 @end
 
 @implementation ScanJetApp
@@ -72,6 +79,7 @@ static NSError *Failure(NSString *text) {
     self.folder=saved?[NSURL fileURLWithPath:saved isDirectory:YES]:
        [[NSFileManager.defaultManager URLsForDirectory:NSDocumentDirectory inDomains:NSUserDomainMask].firstObject URLByAppendingPathComponent:@"Scans" isDirectory:YES];
     self.duplex=[prefs boolForKey:@"duplex"];self.buttons=[prefs boolForKey:@"buttons"];
+    self.needsRecovery=[prefs boolForKey:@"needsRecovery"];if(self.needsRecovery)self.buttons=NO;
     self.format=SJValidFormat([prefs stringForKey:@"format"])?[prefs stringForKey:@"format"]:@"pdf";
     self.quality=SJValidQuality([prefs stringForKey:@"quality"])?[prefs stringForKey:@"quality"]:@"balanced";
     NSMutableDictionary *processing=[NSMutableDictionary new];
@@ -84,6 +92,7 @@ static NSError *Failure(NSString *text) {
     [self add:@"Show controls…" action:@selector(showControls:)];
     self.scanItem=[self add:@"Scan a new document" action:@selector(manualScan:)];
     self.cancelItem=[self add:@"Cancel scan" action:@selector(cancel:)];
+    self.recoveryItem=[self add:@"Recover after jam…" action:@selector(recoverScanner:)];
     [self.menu addItem:NSMenuItem.separatorItem];
     self.buttonItem=[self add:@"Use front Scan button" action:@selector(toggleButtons:)];
     self.duplexItem=[self add:@"Scan both sides" action:@selector(toggleDuplex:)];
@@ -112,7 +121,7 @@ static NSError *Failure(NSString *text) {
     self.queueTimer=[NSTimer scheduledTimerWithTimeInterval:2 repeats:YES block:^(NSTimer *timer){[weak refreshQueue];}];
     [NSRunLoop.mainRunLoop addTimer:self.queueTimer forMode:NSRunLoopCommonModes];
     [self refreshQueue];
-    [self update:self.buttons?@"Checking scanner…":@"Front button paused — manual scan available"];[self schedulePoll:0.1];[self showControls:nil];
+    [self update:self.needsRecovery?@"Scanner needs recovery — use Recover after jam":(self.buttons?@"Checking scanner…":@"Front button paused — manual scan available")];[self schedulePoll:0.1];[self showControls:nil];
 }
 - (void)buildWindow {
     self.window=[[NSWindow alloc] initWithContentRect:NSMakeRect(0,0,500,700)
@@ -130,11 +139,11 @@ static NSError *Failure(NSString *text) {
     self.duplexButton=[NSButton checkboxWithTitle:@"Scan both sides" target:self action:@selector(toggleDuplex:)];
     self.duplexButton.frame=NSMakeRect(275,517,200,24);[view addSubview:self.duplexButton];
     NSTextField *formatLabel=[NSTextField labelWithString:@"Save as"];formatLabel.frame=NSMakeRect(24,478,90,22);[view addSubview:formatLabel];
-    self.formatPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,474,593,28) pullsDown:NO];
+    self.formatPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,474,358,28) pullsDown:NO];
     [self.formatPicker addItemsWithTitles:@[@"PDF — one document",@"JPEG — one image per side"]];
     self.formatPicker.target=self;self.formatPicker.action=@selector(changeFormat:);[view addSubview:self.formatPicker];
     NSTextField *sizeLabel=[NSTextField labelWithString:@"File size"];sizeLabel.frame=NSMakeRect(24,438,90,22);[view addSubview:sizeLabel];
-    self.qualityPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,434,593,28) pullsDown:NO];
+    self.qualityPicker=[[NSPopUpButton alloc] initWithFrame:NSMakeRect(116,434,358,28) pullsDown:NO];
     [self.qualityPicker addItemsWithTitles:@[@"Smallest",@"Balanced (recommended)",@"Higher quality"]];
     self.qualityPicker.target=self;self.qualityPicker.action=@selector(changeQuality:);[view addSubview:self.qualityPicker];
     NSTextField *hint=[NSTextField wrappingLabelWithString:@"All sizes keep 300 dpi. Smaller files use stronger compression. JPEG saves numbered images in a new folder for each batch."];
@@ -165,6 +174,10 @@ static NSError *Failure(NSString *text) {
     choose.frame=NSMakeRect(18,82,145,32);[view addSubview:choose];
     NSButton *show=[NSButton buttonWithTitle:@"Open folder" target:self action:@selector(openFolder:)];
     show.frame=NSMakeRect(162,82,125,32);[view addSubview:show];
+    self.recoveryButton=[NSButton buttonWithTitle:@"Recover after jam…" target:self action:@selector(recoverScanner:)];
+    self.recoveryButton.frame=NSMakeRect(300,82,180,32);
+    self.recoveryButton.toolTip=@"Stop a stalled capture, reconnect this scanner's USB connection, and check readiness. OCR and queued files keep running.";
+    [view addSubview:self.recoveryButton];
     self.scanButton=[NSButton buttonWithTitle:@"Scan new document" target:self action:@selector(manualScan:)];
     self.scanButton.frame=NSMakeRect(284,24,192,34);[view addSubview:self.scanButton];
     self.cancelButton=[NSButton buttonWithTitle:@"Cancel scan" target:self action:@selector(cancel:)];
@@ -173,16 +186,19 @@ static NSError *Failure(NSString *text) {
 - (void)showControls:(id)sender {[self.window makeKeyAndOrderFront:nil];[NSApp activateIgnoringOtherApps:YES];}
 - (BOOL)applicationShouldHandleReopen:(NSApplication *)application hasVisibleWindows:(BOOL)visible {[self showControls:nil];return YES;}
 - (void)update:(NSString *)text {
+    if(self.recovering&&!self.workerMode)text=@"Recovering scanner connection…";
     self.state=text;self.stateItem.title=text;
+    BOOL available=!self.busy&&!self.recovering;
     self.item.button.title=self.busy?@"ScanJet • Scanning":@"ScanJet";
-    self.scanItem.enabled=!self.busy;self.cancelItem.enabled=self.busy&&self.scanStarted&&!self.finishing;
-    self.duplexItem.enabled=!self.busy;self.buttonItem.enabled=!self.busy;self.quitItem.enabled=!self.busy;
+    self.scanItem.enabled=available&&!self.needsRecovery;self.cancelItem.enabled=self.busy&&self.scanStarted&&!self.finishing;
+    self.duplexItem.enabled=available;self.buttonItem.enabled=available&&!self.needsRecovery;self.quitItem.enabled=available;
+    self.recoveryButton.enabled=!self.recovering;self.recoveryItem.enabled=!self.recovering;
     self.duplexItem.state=self.duplex?NSControlStateValueOn:NSControlStateValueOff;
     self.buttonItem.state=self.buttons?NSControlStateValueOn:NSControlStateValueOff;
     self.folderItem.title=[NSString stringWithFormat:@"Save to: %@",self.folder.path.stringByAbbreviatingWithTildeInPath];
     self.statusLabel.stringValue=text;self.folderLabel.stringValue=self.folderItem.title;
-    self.scanButton.enabled=!self.busy;self.cancelButton.enabled=self.cancelItem.enabled;
-    self.listenButton.enabled=!self.busy;self.duplexButton.enabled=!self.busy;
+    self.scanButton.enabled=self.scanItem.enabled;self.cancelButton.enabled=self.cancelItem.enabled;
+    self.listenButton.enabled=self.buttonItem.enabled;self.duplexButton.enabled=available;
     self.listenButton.state=self.buttonItem.state;self.duplexButton.state=self.duplexItem.state;
     [self.formatPicker selectItemAtIndex:[self.format isEqual:@"jpeg"]?1:0];
     [self.qualityPicker selectItemAtIndex:[@[@"small",@"balanced",@"high"] indexOfObject:self.quality]];
@@ -212,7 +228,7 @@ static NSError *Failure(NSString *text) {
         dispatch_async(dispatch_get_main_queue(),^{
             self.polling=NO;
             if(self.busy||!self.buttons)return;
-            if(value<0){self.armed=NO;if(![self.state hasPrefix:@"Scanner unavailable"])[self update:@"Scanner unavailable — close other scan apps"];}
+            if(value<0){self.armed=NO;if(![self.state hasPrefix:@"Scanner unavailable"])[self update:@"Scanner unavailable — use Recover after jam"];}
             else if(value==0){self.armed=YES;if([self.state hasPrefix:@"Checking"]||[self.state hasPrefix:@"Scanner unavailable"])[self update:@"Ready — press the front Scan button"];}
             else if(value==1&&self.armed){self.armed=NO;[self startScan];return;}
             // Cancel/unknown combinations never start an acquisition. After launch,
@@ -223,13 +239,16 @@ static NSError *Failure(NSString *text) {
 }
 - (void)manualScan:(id)sender {[self startScan];}
 - (void)startScan {
-    if(self.busy)return;
+    if(self.busy||(!self.workerMode&&(self.recovering||self.needsRecovery)))return;
     self.busy=YES;self.armed=NO;self.scanStarted=NO;self.finishing=NO;self.selecting=NO;self.deviceReady=NO;self.configured=NO;self.pageError=nil;
     [self.pollTimer invalidate];[self update:@"Opening scanner…"];
     // Serialize manual clicks with a USB poll that may still be returning.
     [self openWhenUSBReleased];
 }
 - (void)openWhenUSBReleased {
+    // Recovery can be clicked while a manual scan is waiting for a USB poll.
+    // Cancel that pending launch so recovery never starts a new acquisition.
+    if(!self.workerMode&&self.recovering){self.busy=NO;self.scanStarted=NO;return;}
     if(self.polling){dispatch_after(dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),dispatch_get_main_queue(),^{[self openWhenUSBReleased];});return;}
     if(!self.workerMode){[self launchWorker];return;}
     NSError *error=nil;NSFileManager *fm=NSFileManager.defaultManager;
@@ -244,7 +263,7 @@ static NSError *Failure(NSString *text) {
     [self.browser start];
     __weak ScanJetApp *weak=self;
     self.openTimer=[NSTimer scheduledTimerWithTimeInterval:30 repeats:NO block:^(NSTimer *t){
-        [weak finish:Failure(@"The scanner did not become ready. Close Image Capture and HP Utility, then try again.")];
+        [weak finish:Failure(@"The scanner did not become ready. Clear any jam, close both sides of the feeder cover, then use Recover after jam. Close other scanner apps if they are open.")];
     }];
 }
 - (void)launchWorker {
@@ -292,11 +311,12 @@ static NSError *Failure(NSString *text) {
     NSString *message=error.length?error:[NSString stringWithFormat:@"Captured %@ pages — ready for the next scan",result[@"pages"]?:@0];
     self.workerPipe=nil;self.worker=nil;self.workerBuffer=nil;
     self.busy=NO;self.scanStarted=NO;self.finishing=NO;self.armed=NO;
+    if(error.length){self.needsRecovery=YES;self.buttons=NO;[NSUserDefaults.standardUserDefaults setBool:YES forKey:@"needsRecovery"];}
     [self update:message];[self schedulePoll:1.5];[self refreshQueue];
-    if(error.length){
+    if(error.length&&!self.recovering){
         NSAlert *alert=[NSAlert new];alert.messageText=@"Scan needs attention";
-        alert.informativeText=message;[alert addButtonWithTitle:@"OK"];
-        [NSApp activateIgnoringOtherApps:YES];[alert runModal];
+        alert.informativeText=message;[alert addButtonWithTitle:@"Recover after jam"];[alert addButtonWithTitle:@"Later"];
+        [NSApp activateIgnoringOtherApps:YES];if([alert runModal]==NSAlertFirstButtonReturn)[self recoverScanner:nil];
     }
 }
 - (void)deviceBrowser:(ICDeviceBrowser *)browser didAddDevice:(ICDevice *)device moreComing:(BOOL)more {
@@ -417,6 +437,7 @@ static NSError *Failure(NSString *text) {
     [self update:self.state];[self schedulePoll:1.5];
 }
 - (void)toggleButtons:(id)sender {
+    if(self.recovering||self.needsRecovery)return;
     self.buttons=!self.buttons;self.armed=NO;
     [NSUserDefaults.standardUserDefaults setBool:self.buttons forKey:@"buttons"];
     [self.pollTimer invalidate];[self update:self.buttons?@"Checking scanner…":@"Front button paused — manual scan available"];
@@ -434,6 +455,51 @@ static NSError *Failure(NSString *text) {
     if(self.busy)return;
     self.quality=[sender isKindOfClass:NSMenuItem.class]?[(NSMenuItem *)sender representedObject]:@[@"small",@"balanced",@"high"][self.qualityPicker.indexOfSelectedItem];
     [NSUserDefaults.standardUserDefaults setObject:self.quality forKey:@"quality"];[self update:self.state];
+}
+- (void)recoverScanner:(id)sender {
+    if(self.recovering)return;
+    self.recovering=YES;self.needsRecovery=YES;self.buttons=NO;self.armed=NO;
+    [NSUserDefaults.standardUserDefaults setBool:YES forKey:@"needsRecovery"];
+    [self.pollTimer invalidate];[self update:@"Recovering scanner connection…"];
+    if(self.worker.running)[self.worker interrupt];
+    self.recoveryDeadline=[NSDate dateWithTimeIntervalSinceNow:12];[self recoverWhenIdle];
+}
+- (void)recoverWhenIdle {
+    if(!self.recovering)return;
+    if(self.busy||self.polling){
+        if(self.recoveryDeadline.timeIntervalSinceNow<=0){
+            if(self.worker.running)kill(self.worker.processIdentifier,SIGKILL);
+            [self recoveryFinished:@{@"ok":@NO,@"message":@"The old scan did not close. Any raw pages are retained. Press Recover after jam again after the capture has stopped."}];return;
+        }
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,100*NSEC_PER_MSEC),dispatch_get_main_queue(),^{[self recoverWhenIdle];});return;
+    }
+    NSTask *task=[NSTask new];self.recoveryTask=task;task.executableURL=NSBundle.mainBundle.executableURL;task.arguments=@[@"--recover-scanner"];
+    NSPipe *pipe=[NSPipe pipe];task.standardOutput=pipe;task.standardError=[NSFileHandle fileHandleWithNullDevice];
+    __weak ScanJetApp *weak=self;
+    task.terminationHandler=^(NSTask *finished){
+        NSData *data=[pipe.fileHandleForReading readDataToEndOfFile];
+        id result=data.length?[NSJSONSerialization JSONObjectWithData:data options:0 error:nil]:nil;
+        if(![result isKindOfClass:NSDictionary.class])result=@{@"ok":@NO,@"message":@"Recovery could not finish. Unplug scanner power and USB for 30 seconds, reconnect, then try recovery again."};
+        dispatch_async(dispatch_get_main_queue(),^{ScanJetApp *app=weak;if(app.recoveryTask==finished)[app recoveryFinished:result];});
+    };
+    NSError *error=nil;
+    if(![task launchAndReturnError:&error]){task.terminationHandler=nil;[self recoveryFinished:@{@"ok":@NO,@"message":error.localizedDescription}];return;}
+    self.recoveryTimer=[NSTimer scheduledTimerWithTimeInterval:45 repeats:NO block:^(NSTimer *timer){
+        if(task.running)[task terminate];
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW,2*NSEC_PER_SEC),dispatch_get_main_queue(),^{if(task.running)kill(task.processIdentifier,SIGKILL);});
+    }];
+}
+- (void)recoveryFinished:(NSDictionary *)result {
+    [self.recoveryTimer invalidate];self.recoveryTask=nil;self.recovering=NO;
+    BOOL ok=[result[@"ok"] boolValue];self.needsRecovery=!ok;
+    [NSUserDefaults.standardUserDefaults setBool:!ok forKey:@"needsRecovery"];
+    self.buttons=ok&&[NSUserDefaults.standardUserDefaults boolForKey:@"buttons"];self.armed=NO;
+    [self update:ok?@"Connection ready — check the red light before scanning":@"Recovery needs attention — scanner remains paused"];
+    if(ok)[self schedulePoll:1.5];
+    else {
+        NSAlert *alert=[NSAlert new];alert.messageText=@"Scanner recovery";alert.informativeText=result[@"message"]?:@"The scanner did not become ready.";
+        [alert addButtonWithTitle:@"OK"];[NSApp activateIgnoringOtherApps:YES];[alert runModal];
+    }
 }
 - (void)changeProcessing:(NSButton *)sender {
     if(self.busy)return;
@@ -484,7 +550,8 @@ static NSError *Failure(NSString *text) {
 @end
 
 int main(int argc,const char **argv) {@autoreleasepool {
-    if(argc==2&&strcmp(argv[1],"--self-test")==0)return SJOutputSelfTest();
+    if(argc==2&&strcmp(argv[1],"--self-test")==0)return SJOutputSelfTest()|SJRecoverySelfTest();
+    if(argc==2&&strcmp(argv[1],"--recover-scanner")==0)return SJRecoverScanner();
     if(argc==3&&strcmp(argv[1],"--process-job")==0)return SJProcessJob([NSURL fileURLWithPath:[NSString stringWithUTF8String:argv[2]]]);
     if(argc>1&&(argc!=7||strcmp(argv[1],"--scan-worker")!=0))return 2;
     [NSApplication sharedApplication];[NSApp setActivationPolicy:NSApplicationActivationPolicyAccessory];
