@@ -14,4 +14,14 @@ Apple's general guide: [Scan images or documents](https://support.apple.com/guid
 
 ## Front-panel scan button
 
-The button workflow is separate from scanning initiated in Image Capture. [HP documents assigning it through HP Utility](https://support.hp.com/gb-en/document/c05294082). Front-button operation is not verified by this release. HP Utility exposes a Scan Button panel for this model on the test Mac, but opening it returned Image Capture error 4294967249 while Image Capture was also running. Its cause has not been established. Do not assume the single-driver addition installs or repairs HP's background button handler.
+Use the optional [ScanJet Button helper](../button-helper/README.md) for one
+fresh PDF per press. Its **Choose save folder…** control remembers the destination;
+**Scan both sides** controls duplex. The default save folder is Documents/Scans.
+The helper can stay in the menu bar with its window closed. It must remain running,
+and Image Capture or other scanner apps must release the scanner first.
+
+The front button was physically verified with this helper, including a second
+document without restarting the app. It leaves HP's built-in button configuration
+unchanged. [HP also documents assigning buttons through HP Utility](https://support.hp.com/gb-en/document/c05294082),
+but that panel returned error 4294967249 during testing. The community helper is
+an independent alternative; it does not repair HP Utility's button workflow.

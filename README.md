@@ -1,6 +1,6 @@
 # HP ScanJet Pro 2000 s1 on macOS 27
 
-An experimental recovery guide and source-only preparation helper for the **HP ScanJet Pro 2000 s1**, USB **03f0:5905**, on Apple Silicon.
+An experimental recovery guide, source-only preparation helper, and optional front-button scanning app for the **HP ScanJet Pro 2000 s1**, USB **03f0:5905**, on Apple Silicon.
 
 **Physically tested on one Mac running macOS 27.0 (26A428):** Image Capture saved a four-page simplex PDF and an eight-page duplex PDF at 300 dpi in color. Every output page was visually checked. The original HP driver runs through **Rosetta**, not natively on ARM64.
 
@@ -15,7 +15,7 @@ The inspected newer 5.20.0.1 package retained this model's registration but omit
 ## Before you start
 
 - Only this model and the exact Mac/OS configuration above have physical test evidence. A second Mac without existing HP software has not been tested.
-- This helper deliberately stops outside macOS 27 on Apple Silicon. Other macOS versions and other scanner models are not covered by this release.
+- The preparation helper deliberately stops outside macOS 27 on Apple Silicon. Other macOS versions and other scanner models are not covered by this release.
 - Rosetta must already work. Follow [Apple's instructions](https://support.apple.com/en-us/102527) if it is absent. The helper does not install Rosetta or accept license terms for you.
 - **Do not expect this workaround to survive macOS 28.** Apple states that general Rosetta availability ends with macOS 27, with macOS 28 retaining only limited support for certain older games. [Apple source](https://support.apple.com/en-us/102527).
 - HP software has its own terms. Read [THIRD-PARTY.md](THIRD-PARTY.md). This project grants no license to HP software.
@@ -39,6 +39,25 @@ Alternatively, use the exact original package you already downloaded from HP:
 
 **Nothing is installed by these commands.** Continue with the [manual installation and rollback guide](docs/INSTALL.md). The only proposed system addition is `/Library/Image Capture/Devices/HP Scanner 4.app`. An existing app at that path must never be overwritten as part of this procedure.
 
+## Optional front-button scanning
+
+The [ScanJet Button helper](button-helper/README.md) adds a native Apple Silicon
+menu-bar app. Each front-button press creates a fresh PDF, with duplex on by
+default and a remembered save folder. Close Image Capture and other scanner apps
+when using it. No OCR or cleanup is applied.
+
+Build from source with Apple's Command Line Tools or Xcode installed:
+
+```sh
+/bin/zsh button-helper/build.zsh
+open 'build/ScanJet Button.app'
+```
+
+Keep the helper running for button scans. It has a local ad-hoc signature, is
+not notarized, and does not register itself as a login item. The HP acquisition
+backend still requires Rosetta. The helper's button detection and repeated
+duplex PDF creation have been physically tested on the same Mac only.
+
 ## Results and limits
 
 | Check | Result on the original test Mac |
@@ -49,7 +68,9 @@ Alternatively, use the exact original package you already downloaded from HP:
 | Color, 300 dpi, US Letter, duplex PDF | Passed; eight pages, both sides upright |
 | Original HP signature and Gatekeeper | Passed; HP Inc. 6HB5Y2QTA3 |
 | Existing HP files after addition | 10,811 original file/link entries unchanged |
-| Reboot, cancel, reconnect recovery after scanning | Not tested |
+| Front button via optional helper | Passed; a fresh two-page duplex PDF after an earlier batch, without restarting the helper |
+| Save-folder choice and separate PDFs | Passed; earlier PDF hashes unchanged |
+| Reboot, physical cancel, USB reconnect recovery | Not tested |
 | Fresh Mac without earlier HP software | Not tested |
 | Native ARM64 backend / macOS 28 | Not provided |
 
